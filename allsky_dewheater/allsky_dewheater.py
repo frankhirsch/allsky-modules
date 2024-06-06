@@ -35,12 +35,13 @@ from adafruit_htu21d import HTU21D
 from meteocalc import heat_index
 from meteocalc import dew_point
 from digitalio import DigitalInOut, Direction, Pull
+from wunderground_pws import WUndergroundAPI, units
     
 metaData = {
     "name": "Sky Dew Heater Control",
     "description": "Controls a dew heater via a temperature and humidity sensor",
     "module": "allsky_dewheater",
-    "version": "v1.0.5",
+    "version": "v1.0.6",
     "events": [
         "periodic"
     ],
@@ -67,7 +68,12 @@ metaData = {
         "period": 120,
         "expire": 240,
         "filename": "openweather.json",
-        "units": "metric"        
+        "units": "metric",
+        "wuapikey": "",
+        "wustationid": "",
+        "wufilename": "wunderground.json",
+        "wuperiod": 120,
+        "wuunits": "metric_si"       
     },
     "argumentdetails": {
         "type" : {
@@ -77,7 +83,7 @@ metaData = {
             "tab": "Sensor",
             "type": {
                 "fieldtype": "select",
-                "values": "None,SHT31,DHT22,DHT11,AM2302,BME280-I2C,HTU21,AHTx0,SOLO-Cloudwatcher,OpenWeather",
+                "values": "None,SHT31,DHT22,DHT11,AM2302,BME280-I2C,HTU21,AHTx0,SOLO-Cloudwatcher,OpenWeather,WeatherUnderground",
                 "default": "None"
             }
         },
@@ -282,8 +288,47 @@ metaData = {
                 "max": 1500,
                 "step": 1
             }          
-        }    
-                        
+        },        
+        "wuapikey": {
+            "required": "true",
+            "description": "API Key",
+            "tab": "WeatherUnderground",             
+            "help": "Your Weather Underground API key. <b style='color: #ff0000'>IMPORTANT</b> Do not use this function and the Weather Underground module as well. If you are using this function then please remove the Weather Underground Module as both create the same overlay data"                  
+        },
+        "wustationid": {
+            "required": "true",
+            "description": "Station ID",
+            "tab": "WeatherUnderground",             
+            "help": "Your WeatherUnderground station ID"
+        },
+        "wufilename": {
+            "required": "true",
+            "description": "Filename",
+            "tab": "WeatherUnderground",             
+            "help": "The name of the file that will be written to the allsky/tmp/extra directory"         
+        },        
+        "wuperiod" : {
+            "required": "true",
+            "description": "Read Every",
+            "tab": "WeatherUnderground",             
+            "help": "Reads data every x seconds. Be careful of the free 1000 request limit per day",                
+            "type": {
+                "fieldtype": "spinner",
+                "min": 60,
+                "max": 1440,
+                "step": 1
+            }          
+        },
+        "wuunits" : {
+            "required": "false",
+            "description": "Units",
+            "tab": "WeatherUnderground",             
+            "help": "Units of measurement. SI, metric, imperial and hybrid",
+            "type": {
+                "fieldtype": "select",
+                "values": "metric_si,metric,imperial,uk_hybrid"
+            }                
+        }                  
     },
     "businfo": [
         "i2c"
@@ -332,7 +377,14 @@ metaData = {
                 "authorurl": "https://github.com/allskyteam",
                 "changes": "Added OpenWeather option"
             }
-        ]                                        
+        ],
+        "v1.0.6" : [
+            {
+                "author": "Alex Greenland",
+                "authorurl": "https://github.com/allskyteam",
+                "changes": "Added Weather Underground option"
+            }
+        ]                                                
     }
 }
 
@@ -431,6 +483,125 @@ def processResult(data, expires, units):
     
     return extraData
 
+def getWUValue(field, jsonData, fileModifiedTime):
+    result = False    
+
+    if field in jsonData:
+        result = jsonData[field]
+
+    return result
+
+def getWUValues(fileName):
+    temperature = None
+    humidity = None
+    pressure = None
+    dewPoint = None
+    
+    allskyPath = s.getEnvironmentVariable("ALLSKY_HOME")
+    extraDataFileName = os.path.join(allskyPath, "config", "overlay", "extra", fileName)
+    
+    if os.path.isfile(extraDataFileName):
+        fileModifiedTime = int(os.path.getmtime(extraDataFileName))
+        with open(extraDataFileName,"r") as file:
+            jsonData = json.load(file)
+            temperature = getWUValue("AS_WUTEMP", jsonData, fileModifiedTime)
+            humidity = getWUValue("AS_WUHUMIDITY", jsonData, fileModifiedTime)
+            pressure = getWUValue("AS_WUQNH", jsonData, fileModifiedTime)
+            dewPoint = getWUValue("AS_WUDEWPOINT", jsonData, fileModifiedTime)
+
+    return temperature, humidity, pressure, dewPoint
+    
+def wuProcessResult(params, data):
+    extraData = {}
+    extraData["AS_WUSTATIONID"] = data['stationID']
+    extraData["AS_WUOBSTIME"] = data['obsTimeLocal']
+    extraData["AS_WURADIATION"] = data['solarRadiation']
+    extraData["AS_WUUV"] = data['uv']  
+    extraData["AS_WUWINDDIR"] = data['winddir']
+    extraData["AS_WUHUMIDITY"] = data['humidity']   
+    extraData["AS_WUWINDCARDINAL"] = createCardinal(data['winddir'])  
+    extraData["AS_WUTEMP"] = data[params['wuunits']]['temp']
+    extraData["AS_WUHEATINDEX"] = data[params['wuunits']]['heatIndex']
+    extraData["AS_WUDEWPOINT"] = data[params['wuunits']]['dewpt']
+    extraData["AS_WUWINDCHILL"] = data[params['wuunits']]['windChill']
+    extraData["AS_WUWINDGUST"] = data[params['wuunits']]['windGust']
+    extraData["AS_WUWINDSPEED"] = data[params['wuunits']]['windSpeed']
+    extraData["AS_WUPRECIPRATE"] = data[params['wuunits']]['precipRate']
+    extraData["AS_WUPRECIPTOTAL"] = data[params['wuunits']]['precipTotal']
+    extraData["AS_WUELEVATION"] = data[params['wuunits']]['elev']
+    extraData["AS_WUQNH"] = data[params['wuunits']]['pressure']
+    if params['wuunits'] == "uk_hybrid":
+        extraData["AS_WUQFE"] = str(float(extraData["AS_WUQNH"]) - (1.0988 * float(extraData["AS_WUELEVATION"]) / 30))
+    if "metric" in params['wuunits']:
+        extraData["AS_WUQFE"] = str(float(extraData["AS_WUQNH"]) - (0.12 * float(extraData["AS_WUELEVATION"])))
+    else:
+        extraData["AS_WUQFE"] = str(float(extraData["AS_WUQNH"]) - (0.97 * float(extraData["AS_WUELEVATION"]) / 900))
+        
+    return extraData
+        
+def readWeatherUnderground(params):
+    
+    apikey = params["wuapikey"]
+    stationid = params["wustationid"]
+    fileName = params["wufilename"]
+    period = int(params["wuperiod"])
+    module = metaData["module"]
+    temperature = None
+    humidity = None
+    pressure = None
+    dewPoint = None
+          
+    if params["wuunits"] == "metric":
+        unit = units.METRIC_UNITS
+    if params["wuunits"] == "metric_si":
+        unit = units.METRIC_SI_UNITS
+    if params["wuunits"] == "imperial":
+        unit = units.ENGLISH_UNITS
+    if params["wuunits"] == "uk_hybrid":
+        unit = units.HYBRID_UNITS
+        
+    try:
+        shouldRun, diff = s.shouldRun(module, period)
+        if shouldRun:
+            if fileName != "":
+                if apikey != "":
+                    if stationid != "":
+                        allskyPath = s.getEnvironmentVariable("ALLSKY_HOME")
+                        if allskyPath is not None:
+                            try:
+                                wu = WUndergroundAPI(api_key=apikey, default_station_id=stationid, units=unit)
+                                response = wu.current()['observations'][0]
+                                extraData = wuProcessResult(params, response)
+                                s.saveExtraData(fileName,extraData)
+                                result = f"Data acquired and written to extra data file {fileName}"
+                                s.log(1,f"INFO: {result}")
+                                s.log(0,f"ERROR: {result}")
+                            except Exception as e:
+                                result = str(e)
+                                s.log(0, f"ERROR: {result}")
+                    else:
+                        result = "Missing WeatherUnderground Station ID"
+                        s.log(0,f"ERROR: {result}")                    
+                else:
+                    result = "Missing WeatherUnderground API key"
+                    s.log(0,f"ERROR: {result}")
+            else:
+                result = "Missing filename for data"
+                s.log(0,f"ERROR: {result}")
+
+            s.setLastRun(module)
+        else:
+            result = f"Last run {diff} seconds ago. Running every {period} seconds. Using Cached Values"
+            s.log(1,f"INFO: {result}")
+
+        temperature, humidity, pressure, dewPoint = getWUValues(fileName) 
+
+    except Exception as e:
+        eType, eObject, eTraceback = sys.exc_info()
+        s.log(0, f"ERROR: Module weatherunderground failed on line {eTraceback.tb_lineno} - {e}")
+        
+    return temperature, humidity, pressure, dewPoint                             
+
 def getOWValue(field, jsonData, fileModifiedTime):
     result = False    
     
@@ -503,8 +674,9 @@ def readOpenWeather(params):
                                     result = f"Got error from Open Weather Map API. Response code {response.status_code}"
                                     s.log(0,f"ERROR: {result}")
                             except Exception as e:
+                                eType, eObject, eTraceback = sys.exc_info()
                                 result = str(e)
-                                s.log(0, f"ERROR: {result}")
+                                s.log(0, f"ERROR: {result} {eTraceback.tb_lineno} - {e}")
                             s.setLastRun(module)                            
                         else:
                             result = "Invalid Longitude. Check the Allsky configuration"
@@ -784,6 +956,8 @@ def getSensorReading(sensorType, inputpin, i2caddress, dhtxxretrycount, dhtxxdel
         temperature, humidity, pressure, dewPoint = readSolo(soloURL)
     elif sensorType == 'OpenWeather':
         temperature, humidity, pressure, dewPoint = readOpenWeather(params)
+    elif sensorType == 'WeatherUnderground':
+        temperature, humidity, pressure, dewPoint = readWeatherUnderground(params)        
     else:
         s.log(0,"ERROR: No sensor type defined")
 
